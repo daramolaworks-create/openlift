@@ -1,0 +1,15 @@
+experiment:
+  name: meta_lagos_test
+  test_geo: Lagos
+  control_geos: [Ibadan, Abeokuta, Benin]
+  pre_period:
+    start_date: 2024-10-01
+    end_date: 2024-12-31
+  post_period:
+    start_date: 2025-01-01
+    end_date: 2025-01-21
+data:
+  path: data.csv
+  date_col: date
+  geo_col: geo
+  outcome_col: outcome

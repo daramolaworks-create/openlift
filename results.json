@@ -1,0 +1,36 @@
+{
+  "experiment": "meta_lagos_test",
+  "test_geo": "Lagos",
+  "control_geos": [
+    "Ibadan",
+    "Abeokuta",
+    "Benin"
+  ],
+  "pre_period": {
+    "start_date": "2024-10-01",
+    "end_date": "2024-12-31"
+  },
+  "post_period": {
+    "start_date": "2025-01-01",
+    "end_date": "2025-01-21"
+  },
+  "metrics": {
+    "incremental_outcome_mean": 219.49614214632356,
+    "incremental_outcome_hdi_90": [
+      209.25988926060836,
+      229.960639136365
+    ],
+    "lift_pct_mean": 0.09327897902577667,
+    "lift_pct_hdi_90": [
+      0.08846933076002043,
+      0.09808717153283318
+    ],
+    "p_positive": 1.0
+  },
+  "model": {
+    "draws": 1000,
+    "tune": 1000,
+    "chains": 2,
+    "target_accept": 0.9
+  }
+}
