@@ -1,0 +1,7 @@
+[theme]
+# Brand Colors: White, Black, Yellow
+primaryColor = "#FFD700"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8F9FA"
+textColor = "#000000"
+font = "sans serif"

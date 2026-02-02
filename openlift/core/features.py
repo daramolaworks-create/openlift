@@ -35,20 +35,18 @@ def make_features(
     expected_post_idx = pd.date_range(start=post_start, end=post_end, freq='D')
     
     try:
+        # Reindex to ensure daily frequency. This introduces NaNs for missing days.
         pre_df = df_wide.reindex(expected_pre_idx)
         post_df = df_wide.reindex(expected_post_idx)
+        
+        # User request: Treat missing days as 0 (e.g. no conversions/spend that day)
+        pre_df = pre_df.fillna(0)
+        post_df = post_df.fillna(0)
+        
     except Exception as e:
         raise ValueError(f"Error reindexing dates: {e}")
         
-    cols_to_check = [test_geo] + control_geos
-    
-    if pre_df[cols_to_check].isnull().any().any():
-        missing_dates = pre_df[pre_df[cols_to_check].isnull().any(axis=1)].index.tolist()
-        raise ValueError(f"Missing data in PRE period for required geos. Dates: {missing_dates[:5]}...")
-        
-    if post_df[cols_to_check].isnull().any().any():
-        missing_dates = post_df[post_df[cols_to_check].isnull().any(axis=1)].index.tolist()
-        raise ValueError(f"Missing data in POST period for required geos. Dates: {missing_dates[:5]}...")
+    # Validation removed as we now explicitly handle missing data as 0.
 
     # Extract Y (test geo)
     y_pre = pre_df[test_geo].values
