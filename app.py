@@ -88,7 +88,8 @@ if uploaded_file is not None:
     if llm_provider_selection == "Gemini":
         provider_key = "gemini"
         api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Enter Google AI Studio key.")
-        model_name = st.sidebar.text_input("Gemini Model", value="gemini-1.5-flash", help="e.g. gemini-1.5-flash, gemini-1.5-pro, gemini-2.0-flash")
+        # User sees Gemini 2.5 Flash in dashboard
+        model_name = st.sidebar.text_input("Gemini Model", value="gemini-2.5-flash", help="e.g. gemini-2.5-flash, gemini-1.5-pro")
     else:
         provider_key = "ollama"
         model_name = st.sidebar.text_input("Local Model Name", value="llama3", help="Make sure you have this model installed via 'ollama pull llama3'")
