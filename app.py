@@ -93,6 +93,9 @@ if uploaded_file is not None:
         provider_key = "ollama"
         model_name = st.sidebar.text_input("Local Model Name", value="llama3", help="Make sure you have this model installed via 'ollama pull llama3'")
         st.sidebar.info("Ensure Ollama is running (`ollama serve`).")
+        # Cloud Warning
+        if "streamlit.app" in str(st.context.active_theme): # Simple heuristic 
+             st.sidebar.warning("⚠️ **Cloud Note:** Ollama (Local) will NOT work on Streamlit Cloud. Switch to Gemini.")
 
     llm = LLMService(provider=provider_key, api_key=api_key, model_name=model_name)
     
@@ -354,24 +357,54 @@ if uploaded_file is not None:
                     
                     **What this means:** Your historical data is stable enough, and your test duration ({duration} days) is long enough to find this signal.
                     """)
-                elif power > 0.5:
-                    st.warning(f"""
-                    **⚠️ Moderate Risk.**
-                    
-                    We only have a **{power*100:.0f}% chance** of detecting the lift you expect. 
-                    It's a coin flip. If the campaign works, we might still miss it because the market is too noisy.
-                    
-                    **Recommendation:** Try **increasing the test duration** or **choosing a less volatile test market**.
-                    """)
                 else:
-                    st.error(f"""
-                    **⛔ Do Not Launch (High Risk)**
+                    # Low Power Case: Recommend MDE
+                    st.warning(f"⚠️ **Low Power ({power*100:.0f}%)**: A {lift_est*100:.0f}% lift is hard to detect.")
                     
-                    Your estimated power is very low (**{power*100:.0f}%**). 
-                    Even if you drive a {lift_est*100:.0f}% lift, the model will likely not see it because of background noise.
+                    with st.spinner("Calculating Minimum Detectable Spend..."):
+                        mde_lift = pa.find_mde(pa_target, pa_controls, duration, lookback_days=lookback)
                     
-                    **Action:** You need a much larger impact (higher lift) or a much longer test to prove value here.
-                    """)
+                    if mde_lift > 0:
+                        rec_text = f"""
+                        **💡 Recommendation:** 
+                        To reach **80% Confidence**, you need a target lift of at least **{mde_lift*100:.0f}%**.
+                        """
+                        
+                        # Calculate Spend for MDE
+                        if cost_col != "None":
+                             est_mde = pa.estimate_required_input(
+                                pa_target, 
+                                cost_col, 
+                                mde_lift, 
+                                duration, 
+                                lookback
+                            )
+                             if est_mde and est_mde['required_input'] > 0:
+                                 rec_text += f"\n\n💰 **Required Investment:** approx. **{est_mde['required_input']:.0f} {cost_col}**."
+                        
+                        st.info(rec_text)
+                    else:
+                        st.error("Even a 50% lift would be hard to detect in this geo. Consider a longer duration.")
+
+                # --- INPUT ESTIMATION (User's Current Input) ---
+                if cost_col != "None":
+                    est = pa.estimate_required_input(
+                        pa_target, 
+                        cost_col, 
+                        lift_est, 
+                        duration, 
+                        lookback
+                    )
+                    
+                    if est and est['required_input'] > 0:
+                        st.info(f"""
+                        💰 **Investment Estimate**
+                        
+                        To achieve this **{lift_est*100:.0f}% lift** (+{est['target_lift_abs']:.0f} {outcome_col}), 
+                        you likely need to adding approx. **{est['required_input']:.0f} {cost_col}** of investment.
+                        
+                        *(Based on historical efficiency of {est['cpr']:.2f} {cost_col} per {outcome_col} in {pa_target})*
+                        """)
                     
                 # --- LLM SMART INSIGHT ---
                 if llm.is_available():

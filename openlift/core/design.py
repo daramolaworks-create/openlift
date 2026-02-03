@@ -221,3 +221,87 @@ class PowerAnalysis:
                 return duration
                 
         return -1 # Not achievable
+        
+    def estimate_required_input(
+        self,
+        test_geo: str,
+        input_col: str,
+        effect_size_pct: float,
+        test_duration_days: int,
+        lookback_days: int = 60
+    ) -> Dict[str, float]:
+        """
+        Estimate the amount of Input (X) required to generate the target Lift (Y).
+        Based on historical efficiency (Sum X / Sum Y) in the test geo.
+        """
+        if input_col not in self.df.columns or input_col == "None":
+            return {}
+
+        # 1. Get Historical Data for Test Geo
+        # We use the most recent 'lookback_days'
+        df_geo = self.df[self.df[self.geo_col] == test_geo].sort_values(self.date_col).tail(lookback_days)
+        
+        if len(df_geo) == 0:
+            return {}
+            
+        # 2. Calculate Efficiency (Cost Per Result)
+        total_input = df_geo[input_col].sum()
+        total_outcome = df_geo[self.outcome_col].sum()
+        
+        if total_outcome == 0:
+            return {"cpr": 0, "required_input": 0, "baseline_outcome": 0}
+            
+        cpr = total_input / total_outcome # e.g. Spend / Conversions
+        
+        # 3. Estimate Baseline Outcome for Test Duration
+        # Avg daily outcome * Duration
+        avg_daily_outcome = total_outcome / len(df_geo)
+        estimated_baseline = avg_daily_outcome * test_duration_days
+        
+        # 4. Calculate Absolute Lift Needed
+        # effect_size_pct is e.g. 0.10 for 10%
+        target_lift_abs = estimated_baseline * effect_size_pct
+        
+        # 5. Calculate Required Input
+        # We assume marginal cost = average cost (conservative linear assumption)
+        required_input = target_lift_abs * cpr
+        
+        return {
+            "cpr": cpr, # Cost Per Result
+            "baseline_outcome": estimated_baseline,
+            "target_lift_abs": target_lift_abs,
+            "required_input": required_input
+        }
+
+    def find_mde(
+        self,
+        test_geo: str,
+        control_geos: List[str],
+        test_duration_days: int,
+        target_power: float = 0.8,
+        lookback_days: int = 60,
+        max_lift: float = 0.5
+    ) -> float:
+        """
+        Find the Minimum Detectable Effect (Lift %) required to achieve target_power.
+        """
+        # Search grid for lift %: 1% to 50%
+        search_grid = [0.01, 0.02, 0.03, 0.04, 0.05, 0.07, 0.10, 0.12, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50]
+        
+        for lift in search_grid:
+            if lift > max_lift:
+                break
+                
+            res = self.simulate_power(
+                test_geo,
+                control_geos,
+                effect_size_pct=lift,
+                test_duration_days=test_duration_days,
+                simulations=40, # Faster check
+                lookback_days=lookback_days
+            )
+            
+            if res['power'] >= target_power:
+                return lift
+                
+        return -1.0 # Not achievable within max_lift

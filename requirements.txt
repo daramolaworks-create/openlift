@@ -1,0 +1,13 @@
+pymc>=5.10.0
+arviz>=0.19.0
+pandas>=2.1.0
+numpy<2.0.0
+typer[all]>=0.9.0
+pydantic>=2.5.0
+ruamel-yaml>=0.18.0
+streamlit>=1.31.0
+matplotlib>=3.8.0
+scikit-learn>=1.3.0
+fastdtw>=0.3.4
+scipy>=1.11.0
+google-generativeai>=0.8.0
