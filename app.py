@@ -94,7 +94,17 @@ if uploaded_file is not None:
         model_name = st.sidebar.text_input("Local Model Name", value="llama3", help="Make sure you have this model installed via 'ollama pull llama3'")
         st.sidebar.info("Ensure Ollama is running (`ollama serve`).")
         # Cloud Warning
-        if "streamlit.app" in str(st.context.active_theme): # Simple heuristic 
+        # Cloud Warning
+        is_cloud = False
+        try:
+            if hasattr(st, "context") and hasattr(st.context, "headers"):
+                host = st.context.headers.get("host", "")
+                if "streamlit.app" in str(host):
+                    is_cloud = True
+        except Exception:
+            pass
+
+        if is_cloud:
              st.sidebar.warning("⚠️ **Cloud Note:** Ollama (Local) will NOT work on Streamlit Cloud. Switch to Gemini.")
 
     llm = LLMService(provider=provider_key, api_key=api_key, model_name=model_name)
