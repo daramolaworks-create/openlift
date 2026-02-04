@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  openlift:
+    build: .
+    container_name: openlift
+    ports:
+      - "8501:8501"
+    environment:
+      - OLLAMA_HOST=http://host.docker.internal:11434 # Try to reach host's Ollama
+      # - GOOGLE_API_KEY=your_key_here
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Allow access to host machine
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data # Persist data if needed
