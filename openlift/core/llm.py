@@ -10,6 +10,11 @@ try:
 except ImportError:
     genai = None
 
+try:
+    import openai
+except ImportError:
+    openai = None
+
 logger = logging.getLogger(__name__)
 
 class LLMService:
@@ -23,6 +28,17 @@ class LLMService:
             self._init_gemini()
         elif self.provider == "ollama":
             self._init_ollama()
+        elif self.provider == "deepseek":
+            self._init_deepseek()
+
+    def _init_deepseek(self):
+        key = self.api_key or os.getenv("DEEPSEEK_API_KEY")
+        if key and openai:
+            try:
+                self.client = openai.OpenAI(api_key=key, base_url="https://api.deepseek.com")
+                self.model_name = self.model_name or "deepseek-reasoner"
+            except Exception as e:
+                logger.error(f"Failed to initialize DeepSeek client: {e}")
 
     def _init_gemini(self):
         # Prefer provided key, fallback to env var
@@ -38,11 +54,12 @@ class LLMService:
 
     def _init_ollama(self):
         # No client needed for REST calls, just set base URL
-        self.ollama_base_url = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        # Default to 127.0.0.1 to avoid IPv6 localhost issues (Errno 99)
+        self.ollama_base_url = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
         self.model_name = self.model_name or "llama3"
 
     def is_available(self) -> bool:
-        if self.provider == "gemini":
+        if self.provider in ["gemini", "deepseek"]:
             return self.client is not None
         elif self.provider == "ollama":
             return True # Assumed available, wil fail at request time if not
@@ -52,7 +69,14 @@ class LLMService:
         """
         Make a raw REST request to Ollama /api/generate
         """
-        url = f"{self.ollama_base_url}/api/generate"
+        urls_to_try = [f"{self.ollama_base_url}/api/generate"]
+        
+        # Fallback logic: if default is 127.0.0.1, try localhost, and vice-versa
+        if "127.0.0.1" in self.ollama_base_url:
+            urls_to_try.append(self.ollama_base_url.replace("127.0.0.1", "localhost") + "/api/generate")
+        elif "localhost" in self.ollama_base_url:
+             urls_to_try.append(self.ollama_base_url.replace("localhost", "127.0.0.1") + "/api/generate")
+
         payload = {
             "model": self.model_name,
             "prompt": prompt,
@@ -60,15 +84,23 @@ class LLMService:
         }
         data = json.dumps(payload).encode("utf-8")
         
-        try:
-            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req) as response:
-                result = json.loads(response.read().decode("utf-8"))
-                return result.get("response", "").strip()
-        except urllib.error.URLError as e:
-            return f"❌ Ollama Connection Error: {e}. Is Ollama running?"
-        except Exception as e:
-            return f"❌ Ollama Error: {e}"
+        last_error = None
+        
+        for url in urls_to_try:
+            try:
+                # logger.info(f"Trying Ollama at {url}")
+                req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+                    return result.get("response", "").strip()
+            except urllib.error.URLError as e:
+                last_error = e
+                # Continue to next URL
+                continue
+            except Exception as e:
+                return f"❌ Ollama Error: {e}"
+        
+        return f"❌ Ollama Connection Error: {last_error}. Is Ollama running?"
 
     def get_experiment_insights(self, experiment_results: Dict[str, Any], context_str: str = "") -> str:
         """
@@ -100,14 +132,28 @@ class LLMService:
         """
         
         if self.provider == "ollama":
-            return self._call_ollama(prompt)
+            res = self._call_ollama(prompt)
+            return {"content": res, "reasoning": None}
+        elif self.provider == "deepseek":
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                msg = response.choices[0].message
+                return {
+                    "content": msg.content.strip() if msg.content else "Done",
+                    "reasoning": getattr(msg, 'reasoning_content', None)
+                }
+            except Exception as e:
+                return {"content": f"Error generating insights with DeepSeek: {e}", "reasoning": None}
         
         # Default Gemini
         try:
             response = self.client.generate_content(prompt)
-            return response.text.strip()
+            return {"content": response.text.strip(), "reasoning": None}
         except Exception as e:
-            return f"Error generating insights with Gemini: {e}"
+            return {"content": f"Error generating insights with Gemini: {e}", "reasoning": None}
 
     def get_power_analysis_insights(self, power_results: Dict[str, Any]) -> str:
         """
@@ -141,11 +187,119 @@ class LLMService:
         """
         
         if self.provider == "ollama":
-            return self._call_ollama(prompt)
+            res = self._call_ollama(prompt)
+            return {"content": res, "reasoning": None}
+        elif self.provider == "deepseek":
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                msg = response.choices[0].message
+                return {
+                    "content": msg.content.strip() if msg.content else "Done",
+                    "reasoning": getattr(msg, 'reasoning_content', None)
+                }
+            except Exception as e:
+                return {"content": f"Error generating insights with DeepSeek: {e}", "reasoning": None}
             
         # Default Gemini
         try:
             response = self.client.generate_content(prompt)
-            return response.text.strip()
+            return {"content": response.text.strip(), "reasoning": None}
         except Exception as e:
-            return f"Error generating insights with Gemini: {e}"
+            return {"content": f"Error generating insights with Gemini: {e}", "reasoning": None}
+
+    def get_multi_cell_insights(self, multi_results: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Generate cross-channel strategy insights for a multi-cell experiment.
+        """
+        if not self.is_available():
+            return {"content": f"{self.provider.title()} insights unavailable.", "reasoning": None}
+
+        cells = multi_results.get("cells", {})
+        comparisons = multi_results.get("comparisons", {})
+        synergy = multi_results.get("synergy")
+
+        # Build cell summary
+        cell_lines = []
+        for label, result in cells.items():
+            if "error" in result:
+                cell_lines.append(f"- {label}: FAILED ({result['error']})")
+                continue
+            m = result.get("metrics", {})
+            cell_lines.append(
+                f"- {label} ({result.get('cell_name', '')}): "
+                f"Lift = {m.get('incremental_outcome_mean', 0):.1f}, "
+                f"Lift% = {m.get('lift_pct_mean', 0):.1f}%, "
+                f"Confidence = {m.get('p_positive', 0)*100:.0f}%"
+            )
+        cell_summary = "\n".join(cell_lines)
+
+        # Build comparison summary
+        comp_lines = []
+        for pair, comp in comparisons.items():
+            if "error" in comp:
+                comp_lines.append(f"- {pair}: Error")
+                continue
+            winner = comp.get("winner", "Inconclusive")
+            confidence = comp.get("confidence_level", "low")
+            comp_lines.append(f"- {pair}: Winner = {winner} ({confidence} confidence)")
+        comp_summary = "\n".join(comp_lines)
+
+        # Build synergy summary
+        synergy_text = "No synergy analysis available."
+        if synergy:
+            synergy_text = (
+                f"Combined cell '{synergy['combined_cell']}' lift = {synergy['combined_lift']:.1f}, "
+                f"sum of individual lifts = {synergy['sum_individual_lifts']:.1f}, "
+                f"synergy delta = {synergy['synergy_delta']:.1f} ({synergy['synergy_pct']:.1f}%), "
+                f"super-additive = {synergy['is_super_additive']}"
+            )
+
+        prompt = f"""
+        You are a senior Marketing Analyst and Media Strategist.
+        Analyze the results of this Multi-Cell Geo-Lift experiment and provide
+        a strategic cross-channel recommendation for a CMO.
+
+        **Per-Cell Results:**
+        {cell_summary}
+
+        **Pairwise Comparisons:**
+        {comp_summary}
+
+        **Synergy Analysis:**
+        {synergy_text}
+
+        **Instructions:**
+        1. Rank the channels/cells from best to worst performer.
+        2. For each channel, state whether to SCALE, MAINTAIN, or CUT budget.
+        3. If synergy exists, explain why the combined approach works.
+        4. Give a clear budget reallocation recommendation (e.g., "shift 30% of Cell B budget to Cell A").
+        5. Mention confidence levels — be honest about statistical certainty.
+        6. Keep it under 200 words. Use formatting for executive readability.
+        """
+
+        if self.provider == "ollama":
+            res = self._call_ollama(prompt)
+            return {"content": res, "reasoning": None}
+        elif self.provider == "deepseek":
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                msg = response.choices[0].message
+                return {
+                    "content": msg.content.strip() if msg.content else "Done",
+                    "reasoning": getattr(msg, 'reasoning_content', None)
+                }
+            except Exception as e:
+                return {"content": f"Error: {e}", "reasoning": None}
+
+        # Default Gemini
+        try:
+            response = self.client.generate_content(prompt)
+            return {"content": response.text.strip(), "reasoning": None}
+        except Exception as e:
+            return {"content": f"Error: {e}", "reasoning": None}

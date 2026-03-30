@@ -7,6 +7,16 @@ from pathlib import Path
 from openlift.core.pipeline import run_geo_lift_df
 from openlift.core.design import GeoMatcher, PowerAnalysis
 from openlift.core.llm import LLMService
+from openlift.core.multi_cell import (
+    MultiCellExperimentConfig,
+    CellConfig,
+    run_multi_cell_experiment,
+)
+from openlift.connectors import GoogleSheetsConnector, GoogleAdsConnector, MetaAdsConnector
+
+# Check which optional connectors are available
+HAS_GOOGLE_ADS = GoogleAdsConnector is not None
+HAS_META_ADS = MetaAdsConnector is not None
 
 st.set_page_config(page_title="OpenLift UI", layout="wide")
 
@@ -63,23 +73,184 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# 1. Upload Data
-st.sidebar.header("Global Data Upload")
-uploaded_file = st.sidebar.file_uploader("Upload CSV (date, geo, outcome)", type=["csv"])
+# 1. Data Source Selection
+st.sidebar.header("Data Source")
+
+# Build available sources
+_sources = ["CSV Upload", "Google Sheets"]
+if HAS_GOOGLE_ADS:
+    _sources.append("Google Ads")
+if HAS_META_ADS:
+    _sources.append("Meta Ads")
+
+data_source = st.sidebar.radio("Load data from:", _sources, index=0, horizontal=True)
+
+uploaded_file = None
+df = None
+
+if data_source == "CSV Upload":
+    uploaded_file = st.sidebar.file_uploader("Upload CSV (date, geo, outcome)", type=["csv"])
+
+# ------------------------------------------------------------------
+# Google Sheets Connector
+# ------------------------------------------------------------------
+elif data_source == "Google Sheets":
+    st.sidebar.markdown("---")
+    gs_method = st.sidebar.selectbox("Auth Method", ["API Key (Public Sheets)", "Service Account JSON"], key="gs_auth")
+    gs_sheet_url = st.sidebar.text_input("Google Sheet URL", help="Full URL of the Google Spreadsheet")
+    gs_worksheet = st.sidebar.text_input("Worksheet Name (optional)", help="Leave blank for first sheet")
+    gs_date_col = st.sidebar.text_input("Date column name in sheet", value="date")
+    gs_geo_col = st.sidebar.text_input("Geo column name in sheet", value="geo")
+    gs_outcome_col = st.sidebar.text_input("Outcome column name in sheet", value="outcome")
+
+    if gs_method == "API Key (Public Sheets)":
+        gs_api_key = st.sidebar.text_input("Google API Key", type="password")
+    else:
+        gs_sa_file = st.sidebar.file_uploader("Service Account JSON", type=["json"], key="gs_sa")
+
+    if st.sidebar.button("Connect & Fetch", key="gs_connect"):
+        connector = GoogleSheetsConnector()
+        creds = {
+            "sheet_url": gs_sheet_url,
+            "date_col": gs_date_col,
+            "geo_col": gs_geo_col,
+            "outcome_col": gs_outcome_col,
+        }
+        if gs_worksheet:
+            creds["worksheet"] = gs_worksheet
+
+        if gs_method == "API Key (Public Sheets)" and gs_api_key:
+            creds["api_key"] = gs_api_key
+        elif gs_method == "Service Account JSON" and gs_sa_file:
+            import json as _json
+            creds["service_account_info"] = _json.loads(gs_sa_file.read())
+        else:
+            st.sidebar.error("Provide credentials.")
+            st.stop()
+
+        with st.sidebar:
+            with st.spinner("Connecting to Google Sheets..."):
+                if connector.authenticate(creds):
+                    fetched = connector.fetch_data(
+                        start_date="2000-01-01",
+                        end_date="2099-12-31",
+                        geo_col=gs_geo_col,
+                        outcome_col=gs_outcome_col,
+                    )
+                    st.session_state["connector_df"] = fetched
+                    st.sidebar.success(f"Fetched {len(fetched)} rows from Google Sheets.")
+                else:
+                    st.sidebar.error("Connection failed. Check URL and credentials.")
+
+# ------------------------------------------------------------------
+# Google Ads Connector
+# ------------------------------------------------------------------
+elif data_source == "Google Ads":
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Google Ads Credentials")
+    ga_dev_token = st.sidebar.text_input("Developer Token", type="password", key="ga_dev")
+    ga_client_id = st.sidebar.text_input("Client ID", key="ga_cid")
+    ga_client_secret = st.sidebar.text_input("Client Secret", type="password", key="ga_cs")
+    ga_refresh_token = st.sidebar.text_input("Refresh Token", type="password", key="ga_rt")
+    ga_customer_id = st.sidebar.text_input("Customer ID (10 digits, no dashes)", key="ga_custid")
+    ga_login_customer_id = st.sidebar.text_input("Login Customer ID (MCC, optional)", key="ga_login")
+    ga_geo_level = st.sidebar.selectbox("Geo Level", ["region", "city", "country"], key="ga_geo_level")
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Date Range")
+    ga_start = st.sidebar.text_input("Start Date (YYYY-MM-DD)", value="2024-01-01", key="ga_start")
+    ga_end = st.sidebar.text_input("End Date (YYYY-MM-DD)", value="2024-12-31", key="ga_end")
+    ga_outcome = st.sidebar.selectbox("Primary Outcome", ["conversions", "spend", "clicks", "impressions"], key="ga_outcome")
+
+    if st.sidebar.button("Connect & Fetch", key="ga_connect"):
+        connector = GoogleAdsConnector()
+        creds = {
+            "developer_token": ga_dev_token,
+            "client_id": ga_client_id,
+            "client_secret": ga_client_secret,
+            "refresh_token": ga_refresh_token,
+            "customer_id": ga_customer_id,
+            "geo_level": ga_geo_level,
+        }
+        if ga_login_customer_id:
+            creds["login_customer_id"] = ga_login_customer_id
+
+        with st.sidebar:
+            with st.spinner("Connecting to Google Ads..."):
+                if connector.authenticate(creds):
+                    try:
+                        fetched = connector.fetch_data(
+                            start_date=ga_start,
+                            end_date=ga_end,
+                            outcome_col=ga_outcome,
+                        )
+                        st.session_state["connector_df"] = fetched
+                        st.sidebar.success(f"Fetched {len(fetched)} rows from Google Ads.")
+                    except Exception as e:
+                        st.sidebar.error(f"Fetch failed: {e}")
+                else:
+                    st.sidebar.error("Auth failed. Check credentials.")
+
+# ------------------------------------------------------------------
+# Meta Ads Connector
+# ------------------------------------------------------------------
+elif data_source == "Meta Ads":
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Meta Ads Credentials")
+    meta_token = st.sidebar.text_input("Access Token", type="password", key="meta_token", help="Long-lived user or system user token")
+    meta_account = st.sidebar.text_input("Ad Account ID", key="meta_account", help="e.g. act_123456789")
+    meta_app_id = st.sidebar.text_input("App ID (optional)", value="0", key="meta_appid")
+    meta_app_secret = st.sidebar.text_input("App Secret (optional)", type="password", key="meta_secret")
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Date Range")
+    meta_start = st.sidebar.text_input("Start Date (YYYY-MM-DD)", value="2024-01-01", key="meta_start")
+    meta_end = st.sidebar.text_input("End Date (YYYY-MM-DD)", value="2024-12-31", key="meta_end")
+    meta_outcome = st.sidebar.selectbox("Primary Outcome", ["conversions", "spend", "clicks", "impressions"], key="meta_outcome")
+
+    if st.sidebar.button("Connect & Fetch", key="meta_connect"):
+        connector = MetaAdsConnector()
+        creds = {
+            "access_token": meta_token,
+            "ad_account_id": meta_account,
+            "app_id": meta_app_id,
+            "app_secret": meta_app_secret,
+        }
+
+        with st.sidebar:
+            with st.spinner("Connecting to Meta Ads..."):
+                if connector.authenticate(creds):
+                    try:
+                        fetched = connector.fetch_data(
+                            start_date=meta_start,
+                            end_date=meta_end,
+                            outcome_col=meta_outcome,
+                        )
+                        st.session_state["connector_df"] = fetched
+                        st.sidebar.success(f"Fetched {len(fetched)} rows from Meta Ads.")
+                    except Exception as e:
+                        st.sidebar.error(f"Fetch failed: {e}")
+                else:
+                    st.sidebar.error("Auth failed. Check token and account ID.")
+
+# Load from connector session state
+if "connector_df" in st.session_state and df is None:
+    df = st.session_state["connector_df"]
 
 if uploaded_file is not None:
     @st.cache_data
     def load_csv(file):
         return pd.read_csv(file)
-        
     df = load_csv(uploaded_file)
+
+if df is not None:
     
     st.sidebar.success(f"Loaded {len(df)} rows.")
     
     # LLM Config
     st.sidebar.divider()
     st.sidebar.subheader("🤖 AI Co-Pilot")
-    llm_provider_selection = st.sidebar.selectbox("Provider", ["Gemini", "Ollama (Local)"], index=0)
+    llm_provider_selection = st.sidebar.selectbox("Provider", ["Gemini", "DeepSeek (Reasoner)", "Ollama (Local)"], index=0)
     
     api_key = None
     model_name = None
@@ -90,6 +261,10 @@ if uploaded_file is not None:
         api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Enter Google AI Studio key.")
         # User sees Gemini 2.5 Flash in dashboard
         model_name = st.sidebar.text_input("Gemini Model", value="gemini-2.5-flash", help="e.g. gemini-2.5-flash, gemini-1.5-pro")
+    elif llm_provider_selection == "DeepSeek (Reasoner)":
+        provider_key = "deepseek"
+        api_key = st.sidebar.text_input("DeepSeek API Key", type="password", help="Enter DeepSeek API key.")
+        model_name = st.sidebar.text_input("DeepSeek Model", value="deepseek-reasoner", help="defaults to deepseek-reasoner")
     else:
         provider_key = "ollama"
         model_name = st.sidebar.text_input("Local Model Name", value="llama3", help="Make sure you have this model installed via 'ollama pull llama3'")
@@ -130,7 +305,7 @@ if uploaded_file is not None:
     max_date = df[date_col].max().date()
     all_geos = sorted(df[geo_col].unique().tolist())
     
-    tab1, tab2, tab3 = st.tabs(["🚀 Experiment Runner", "🗺️ Geo Matcher", "⚡ Power Analysis"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🚀 Experiment Runner", "🗺️ Geo Matcher", "⚡ Power Analysis", "🧪 Multi-Cell"])
     
     # ==========================================
     # TAB 1: EXPERIMENT RUNNER (Existing Logic)
@@ -150,11 +325,57 @@ if uploaded_file is not None:
         post_start = col_dates[2].date_input("Post Start", max_date, min_value=min_date, max_value=max_date, key="run_post_start")
         post_end = col_dates[3].date_input("Post End", max_date, min_value=min_date, max_value=max_date, key="run_post_end")
         
+        # --- External Covariates ---
+        from openlift.core.covariates import SUPPORTED_COUNTRIES, GEO_COORDINATES
+        
+        with st.expander("🌦️ External Covariates (Holidays & Weather)", expanded=False):
+            st.markdown(
+                "Adding external covariates helps the model control for holidays and weather shocks, "
+                "resulting in **tighter confidence intervals** and a **lower MDE**."
+            )
+            cov_c1, cov_c2 = st.columns(2)
+            
+            with cov_c1:
+                use_holidays = st.toggle("Control for Holidays", value=False, key="use_holidays")
+                if use_holidays:
+                    country_options = [f"{code} — {name}" for code, name in SUPPORTED_COUNTRIES.items()]
+                    selected_country = st.selectbox("Country", country_options, index=0, key="holiday_country")
+                    cov_country_code = selected_country.split(" — ")[0]
+                else:
+                    cov_country_code = None
+            
+            with cov_c2:
+                use_weather = st.toggle("Control for Weather", value=False, key="use_weather")
+                if use_weather:
+                    # Try auto-detect from test geo
+                    auto_coords = GEO_COORDINATES.get(test_geo.lower().strip()) if test_geo else None
+                    default_lat = auto_coords[0] if auto_coords else 6.45
+                    default_lon = auto_coords[1] if auto_coords else 3.40
+                    
+                    if auto_coords:
+                        st.success(f"Auto-detected: {test_geo} → ({default_lat}, {default_lon})")
+                    
+                    cov_lat = st.number_input("Latitude", value=default_lat, format="%.4f", key="cov_lat")
+                    cov_lon = st.number_input("Longitude", value=default_lon, format="%.4f", key="cov_lon")
+                else:
+                    cov_lat = None
+                    cov_lon = None
+        
         if st.button("Run Measurement", type="primary"):
             if len(control_geos) < 2:
                 st.error("Need at least 2 control geos.")
             else:
-                with st.spinner("Running MCMC Sampling..."):
+                spinner_msg = "Running MCMC Sampling"
+                if use_holidays or use_weather:
+                    extras = []
+                    if use_holidays:
+                        extras.append("holidays")
+                    if use_weather:
+                        extras.append("weather")
+                    spinner_msg += f" (with {', '.join(extras)} covariates)"
+                spinner_msg += "..."
+                
+                with st.spinner(spinner_msg):
                     try:
                         results = run_geo_lift_df(
                             df=df,
@@ -166,7 +387,10 @@ if uploaded_file is not None:
                             post_end=str(post_end),
                             date_col=date_col,
                             geo_col=geo_col,
-                            outcome_col=outcome_col
+                            outcome_col=outcome_col,
+                            country_code=cov_country_code,
+                            latitude=cov_lat,
+                            longitude=cov_lon,
                         )
                         m = results['metrics']
                         
@@ -223,6 +447,20 @@ if uploaded_file is not None:
                             cpi = input_change_abs / m['incremental_outcome_mean']
                             st.info(f"💰 **Efficiency:** You spent approx. **{input_change_abs:.1f}** more {cost_col} to get **{m['incremental_outcome_mean']:.1f}** more {outcome_col}.\n\n**Cost Per Incremental Result:** {cpi:.2f}")
 
+                        # --- COVARIATE EFFECTS ---
+                        if m.get("covariate_effects"):
+                            st.subheader("🌦️ Covariate Effects")
+                            cov_effects = m["covariate_effects"]
+                            cov_cols = st.columns(len(cov_effects))
+                            for idx, (cov_name, effect) in enumerate(cov_effects.items()):
+                                icon = "📅" if "holiday" in cov_name else "🌡️" if "temp" in cov_name else "🌧️" if "precip" in cov_name else "📊"
+                                cov_cols[idx].metric(
+                                    f"{icon} {cov_name}",
+                                    f"{effect:+.3f}",
+                                    help=f"Learned effect of {cov_name} on daily {outcome_col}. Positive = increases outcome on those days."
+                                )
+                            st.caption("These covariates were automatically controlled for in the Bayesian model, improving the accuracy of the lift estimate.")
+
                         # --- INSIGHTS ---
                         st.subheader("💡 Analysis & Insights")
                         
@@ -257,12 +495,20 @@ if uploaded_file is not None:
                                     context += f", Input Shift: {input_change_abs:.1f} ({cost_col})"
                                     
                                 smart_insight = llm.get_experiment_insights(results, context_str=context)
-                                st.info(f"🤖 **AI Co-Pilot Verdict:**\n\n{smart_insight}")
+                                if isinstance(smart_insight, dict) and smart_insight.get("reasoning"):
+                                    with st.expander("🧠 AI Thought Process (DeepSeek Reasoner)"):
+                                        st.write(smart_insight["reasoning"])
+                                    st.info(f"🤖 **AI Co-Pilot Verdict:**\n\n{smart_insight['content']}")
+                                else:
+                                    content = smart_insight['content'] if isinstance(smart_insight, dict) else smart_insight
+                                    st.info(f"🤖 **AI Co-Pilot Verdict:**\n\n{content}")
                         elif api_key: # Key entered but invalid?
                              st.warning("AI Key provided but client failed to initialize.")
                         else:
                              if provider_key == "gemini":
                                  st.markdown("*Tip: Enter Gemini API Key in sidebar for AI analysis.*")
+                             elif provider_key == "deepseek":
+                                 st.markdown("*Tip: Enter DeepSeek API Key in sidebar for AI analysis.*")
                              else:
                                  st.warning("Ollama provider selected but not available.")
                         
@@ -421,7 +667,177 @@ if uploaded_file is not None:
                 if llm.is_available():
                         with st.spinner("Generating AI Recommendations..."):
                             smart_power = llm.get_power_analysis_insights(res)
-                            st.info(f"🤖 **AI Co-Pilot Recommendations:**\n\n{smart_power}")
+                            if isinstance(smart_power, dict) and smart_power.get("reasoning"):
+                                with st.expander("🧠 AI Thought Process (DeepSeek Reasoner)"):
+                                    st.write(smart_power["reasoning"])
+                                st.info(f"🤖 **AI Co-Pilot Recommendations:**\n\n{smart_power['content']}")
+                            else:
+                                content = smart_power['content'] if isinstance(smart_power, dict) else smart_power
+                                st.info(f"🤖 **AI Co-Pilot Recommendations:**\n\n{content}")
+
+    # ==========================================
+    # TAB 4: MULTI-CELL EXPERIMENT
+    # ==========================================
+    with tab4:
+        st.header("Multi-Cell / Cross-Channel Experiment")
+        st.markdown(
+            "Test **multiple channels or campaigns simultaneously** against a shared holdout group. "
+            "Compare which channel drives more incremental lift and detect synergy effects."
+        )
+
+        # --- Cell definition ---
+        st.subheader("Define Cells")
+        num_cells = st.number_input("Number of treatment cells", 2, 8, 2, key="mc_num_cells")
+
+        cell_configs = []
+        cell_cols = st.columns(min(int(num_cells), 4))
+        used_geos = set()
+
+        for i in range(int(num_cells)):
+            col = cell_cols[i % len(cell_cols)]
+            with col:
+                label = st.text_input(f"Cell {i+1} Label", value=chr(65 + i), key=f"mc_label_{i}")
+                name = st.text_input(f"Cell {i+1} Name", value=f"Channel {i+1}", key=f"mc_name_{i}")
+                available = [g for g in all_geos if g not in used_geos]
+                geos = st.multiselect(f"Cell {i+1} Test Geos", available, key=f"mc_geos_{i}")
+                used_geos.update(geos)
+                cell_configs.append({"name": name, "label": label, "test_geos": geos})
+
+        # --- Shared controls ---
+        st.subheader("Shared Holdout (Control Group)")
+        remaining_geos = [g for g in all_geos if g not in used_geos]
+        mc_controls = st.multiselect(
+            "Control Geos",
+            remaining_geos,
+            default=remaining_geos[:min(5, len(remaining_geos))],
+            key="mc_controls",
+        )
+
+        # --- Date ranges ---
+        st.subheader("Experiment Periods")
+        mc_date_cols = st.columns(4)
+        mc_pre_start = mc_date_cols[0].date_input("Pre Start", min_date, min_value=min_date, max_value=max_date, key="mc_pre_start")
+        mc_pre_end = mc_date_cols[1].date_input("Pre End", min_date, min_value=min_date, max_value=max_date, key="mc_pre_end")
+        mc_post_start = mc_date_cols[2].date_input("Post Start", max_date, min_value=min_date, max_value=max_date, key="mc_post_start")
+        mc_post_end = mc_date_cols[3].date_input("Post End", max_date, min_value=min_date, max_value=max_date, key="mc_post_end")
+
+        # --- Run ---
+        if st.button("Run Multi-Cell Experiment", type="primary", key="mc_run"):
+            # Validate
+            valid = True
+            for i, cc in enumerate(cell_configs):
+                if not cc["test_geos"]:
+                    st.error(f"Cell {cc['label']} has no test geos.")
+                    valid = False
+            if len(mc_controls) < 2:
+                st.error("Need at least 2 control geos.")
+                valid = False
+
+            if valid:
+                with st.spinner("Running Multi-Cell MCMC (this may take a moment)..."):
+                    try:
+                        from datetime import datetime as _dt
+                        mc_config = MultiCellExperimentConfig(
+                            name="multi_cell_experiment",
+                            cells=[CellConfig(**cc) for cc in cell_configs],
+                            control_geos=mc_controls,
+                            pre_period={"start_date": mc_pre_start, "end_date": mc_pre_end},
+                            post_period={"start_date": mc_post_start, "end_date": mc_post_end},
+                        )
+
+                        mc_results = run_multi_cell_experiment(
+                            df=df,
+                            config=mc_config,
+                            date_col=date_col,
+                            geo_col=geo_col,
+                            outcome_col=outcome_col,
+                        )
+
+                        # --- Per-Cell Results ---
+                        st.divider()
+                        st.subheader("📊 Per-Cell Results")
+                        result_cols = st.columns(len(cell_configs))
+                        for idx, (label, result) in enumerate(mc_results["cells"].items()):
+                            with result_cols[idx % len(result_cols)]:
+                                if "error" in result:
+                                    st.error(f"**{label}** — {result['error']}")
+                                else:
+                                    m = result["metrics"]
+                                    st.markdown(f"### {label}: {result.get('cell_name', '')}")
+                                    st.metric("Incremental Lift", f"{m['incremental_outcome_mean']:.1f}")
+                                    st.metric("Lift %", f"{m['lift_pct_mean']:.1f}%")
+                                    st.metric("Confidence", f"{m['p_positive']*100:.0f}%")
+                                    st.caption(f"Geos: {', '.join(result.get('cell_test_geos', []))}")
+
+                        # --- Pairwise Comparisons ---
+                        st.divider()
+                        st.subheader("⚖️ Pairwise Comparisons")
+                        for pair_key, comp in mc_results["comparisons"].items():
+                            if "error" in comp:
+                                st.warning(f"{pair_key}: {comp['error']}")
+                                continue
+                            winner = comp.get("winner", "Inconclusive")
+                            conf = comp.get("confidence_level", "low")
+                            delta = comp.get("absolute_delta", 0)
+
+                            emoji = "🏆" if conf == "high" else "📊" if conf == "moderate" else "❓"
+                            st.info(
+                                f"{emoji} **{pair_key.replace('_vs_', ' vs ')}** — "
+                                f"Winner: **{winner}** ({conf} confidence) | "
+                                f"Absolute delta: {delta:.1f}"
+                            )
+
+                        # --- Synergy ---
+                        if mc_results.get("synergy"):
+                            st.divider()
+                            st.subheader("🔗 Synergy Analysis")
+                            syn = mc_results["synergy"]
+                            if syn["is_super_additive"]:
+                                st.success(
+                                    f"✅ **Super-additive synergy detected!** "
+                                    f"Combined cell '{syn['combined_cell']}' achieved "
+                                    f"**{syn['synergy_pct']:.1f}% more lift** than the sum of individual cells."
+                                )
+                            else:
+                                st.warning(
+                                    f"⚠️ No positive synergy. Combined lift ({syn['combined_lift']:.1f}) "
+                                    f"≤ sum of individual lifts ({syn['sum_individual_lifts']:.1f})."
+                                )
+
+                        # --- Comparison Bar Chart ---
+                        st.divider()
+                        st.subheader("📈 Lift Comparison")
+                        chart_data = []
+                        for label, result in mc_results["cells"].items():
+                            if "error" not in result:
+                                m = result["metrics"]
+                                chart_data.append({
+                                    "Cell": f"{label}: {result.get('cell_name', '')}",
+                                    "Incremental Lift": m["incremental_outcome_mean"],
+                                    "Lift %": m["lift_pct_mean"],
+                                })
+                        if chart_data:
+                            chart_df = pd.DataFrame(chart_data).set_index("Cell")
+                            st.bar_chart(chart_df["Incremental Lift"])
+
+                        # --- AI Insight ---
+                        if llm.is_available():
+                            with st.spinner("Generating cross-channel strategy..."):
+                                mc_insight = llm.get_multi_cell_insights(mc_results)
+                                if isinstance(mc_insight, dict) and mc_insight.get("reasoning"):
+                                    with st.expander("🧠 AI Thought Process (DeepSeek Reasoner)"):
+                                        st.write(mc_insight["reasoning"])
+                                    st.info(f"🤖 **AI Channel Strategy:**\n\n{mc_insight['content']}")
+                                else:
+                                    content = mc_insight["content"] if isinstance(mc_insight, dict) else mc_insight
+                                    st.info(f"🤖 **AI Channel Strategy:**\n\n{content}")
+
+                        # Raw JSON
+                        with st.expander("Raw Results JSON"):
+                            st.json(mc_results)
+
+                    except Exception as e:
+                        st.error(f"Multi-Cell Error: {e}")
 
 else:
-    st.info("Please upload a CSV file to begin.")
+    st.info("Please upload a CSV file or connect a data source to begin.")

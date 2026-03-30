@@ -42,5 +42,5 @@ def test_experiment_short_pre(tmp_path):
     with open(p, "w") as f:
         yaml.dump(config, f)
         
-    with pytest.raises(ValueError, match="Pre-period must be at least 30 days"):
+    with pytest.raises(ValueError, match="Pre-period must be at least 14 days"):
         load_experiment_config(str(p))

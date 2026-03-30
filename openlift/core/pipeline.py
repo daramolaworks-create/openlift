@@ -1,4 +1,4 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import pandas as pd
 import os
 
@@ -38,7 +38,10 @@ def run_geo_lift_df(
     date_col: str = 'date',
     geo_col: str = 'geo',
     outcome_col: str = 'outcome',
-    name: str = "custom_experiment"
+    name: str = "custom_experiment",
+    country_code: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
 ) -> Dict[str, Any]:
     df[date_col] = pd.to_datetime(df[date_col])
     df_wide = df.pivot(index=date_col, columns=geo_col, values=outcome_col).sort_index()
@@ -56,20 +59,34 @@ def run_geo_lift_df(
     
     exp = ExperimentConfig(**exp_config)
     
-    return _run_pipeline(df_wide, exp)
+    return _run_pipeline(
+        df_wide, exp,
+        country_code=country_code,
+        latitude=latitude,
+        longitude=longitude,
+    )
 
-def _run_pipeline(df_wide: pd.DataFrame, exp: ExperimentConfig) -> Dict[str, Any]:
-    y_pre, X_pre, dow_pre, y_post, X_post, dow_post, scaler = make_features(
+def _run_pipeline(
+    df_wide: pd.DataFrame,
+    exp: ExperimentConfig,
+    country_code: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+) -> Dict[str, Any]:
+    y_pre, X_pre, dow_pre, y_post, X_post, dow_post, scaler, Z_pre, Z_post, covariate_names = make_features(
         df_wide, 
         exp.test_geo, 
         exp.control_geos, 
         pd.Timestamp(exp.pre_period.start_date),
         pd.Timestamp(exp.pre_period.end_date),
         pd.Timestamp(exp.post_period.start_date),
-        pd.Timestamp(exp.post_period.end_date)
+        pd.Timestamp(exp.post_period.end_date),
+        country_code=country_code,
+        latitude=latitude,
+        longitude=longitude,
     )
     
-    model = build_model(y_pre, X_pre, dow_pre)
+    model = build_model(y_pre, X_pre, dow_pre, Z_pre=Z_pre)
     
     draws = 1000
     tune = 1000
@@ -84,14 +101,21 @@ def _run_pipeline(df_wide: pd.DataFrame, exp: ExperimentConfig) -> Dict[str, Any
         target_accept=target_accept
     )
     
-    metrics = compute_lift(idata, y_post, X_post, dow_post)
+    metrics = compute_lift(
+        idata, y_post, X_post, dow_post,
+        Z_post=Z_post,
+        covariate_names=covariate_names,
+    )
     
     model_config = {
         "draws": draws,
         "tune": tune,
         "chains": chains,
-        "target_accept": target_accept
+        "target_accept": target_accept,
     }
+    
+    if covariate_names:
+        model_config["covariates"] = covariate_names
     
     exp_dict = {
         "name": exp.name,
