@@ -42,6 +42,16 @@ class DataConnector(ABC):
     def is_authenticated(self) -> bool:
         return self._authenticated
 
+    def status(self) -> Dict:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "authenticated": self._authenticated,
+            "available": True,
+            "required_credentials": [],
+            "metrics": [],
+        }
+
     # ------------------------------------------------------------------
     # Discovery
     # ------------------------------------------------------------------

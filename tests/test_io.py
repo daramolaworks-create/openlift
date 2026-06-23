@@ -33,5 +33,5 @@ def test_load_data_duplicates(tmp_path):
     })
     df.to_csv(d, index=False)
     
-    with pytest.raises(ValueError, match="Duplicate entries"):
-        load_data(str(d), "date", "geo", "outcome")
+    res = load_data(str(d), "date", "geo", "outcome")
+    assert res.loc[pd.Timestamp("2024-01-01"), "A"] == 3

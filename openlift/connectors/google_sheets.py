@@ -33,6 +33,16 @@ class GoogleSheetsConnector(DataConnector):
         self._worksheet = None
         self._column_map: Dict[str, str] = {}
 
+    def status(self) -> Dict:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "authenticated": self._authenticated,
+            "available": HAS_GSPREAD,
+            "required_credentials": ["sheet_url", "api_key or service_account_info"],
+            "metrics": self.list_available_metrics() if self._authenticated else [],
+        }
+
     # ------------------------------------------------------------------
     # Auth
     # ------------------------------------------------------------------

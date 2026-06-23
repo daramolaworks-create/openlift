@@ -1,7 +1,14 @@
+import os
+import tempfile
+from typing import Optional
+
+_PYTENSOR_CACHE = os.path.join(tempfile.gettempdir(), "openlift_pytensor")
+os.makedirs(_PYTENSOR_CACHE, exist_ok=True)
+os.environ.setdefault("PYTENSOR_FLAGS", f"base_compiledir={_PYTENSOR_CACHE},compiledir={_PYTENSOR_CACHE}")
+
 import pymc as pm
 import numpy as np
 import arviz as az
-from typing import Optional
 
 def build_model(
     y_pre: np.ndarray,
@@ -55,6 +62,7 @@ def fit_model(
     """
     Sample from the model.
     """
+    _ensure_writable_pytensor_cache()
     with model:
         idata = pm.sample(
             draws=draws, 
@@ -65,3 +73,23 @@ def fit_model(
             progressbar=True
         )
     return idata
+
+
+def _ensure_writable_pytensor_cache() -> None:
+    """
+    PyTensor defaults to ~/.pytensor, which is not always writable in managed
+    runtimes. Point it at /tmp unless the caller has configured a usable cache.
+    """
+    try:
+        import pytensor
+
+        current = os.path.expanduser(str(pytensor.config.compiledir))
+        if os.access(current, os.R_OK | os.W_OK | os.X_OK):
+            return
+        fallback = os.path.join(tempfile.gettempdir(), "openlift_pytensor")
+        os.makedirs(fallback, exist_ok=True)
+        pytensor.config.compiledir = fallback
+    except Exception:
+        fallback = os.path.join(tempfile.gettempdir(), "openlift_pytensor")
+        os.makedirs(fallback, exist_ok=True)
+        os.environ.setdefault("PYTENSOR_FLAGS", f"compiledir={fallback}")

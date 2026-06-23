@@ -4,3 +4,4 @@ Welcome to OpenLift.
 
 - [Assumptions](assumptions.md)
 - [Theory](theory.md)
+- [Methodology](methodology.md)

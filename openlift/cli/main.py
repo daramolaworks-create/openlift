@@ -2,8 +2,18 @@ import typer
 import json
 from openlift.core.pipeline import run_geo_lift
 from openlift.core.report import print_summary
+import openlift
 
 app = typer.Typer(help="OpenLift: Marketing incrementality measurement.")
+
+
+@app.callback(invoke_without_command=True)
+def _root(
+    version: bool = typer.Option(False, "--version", "-V", help="Show version and exit.", is_eager=True),
+):
+    if version:
+        typer.echo(f"openlift {openlift.__version__}")
+        raise typer.Exit()
 
 @app.command()
 def init():
@@ -81,7 +91,6 @@ def report(
 # ... (existing imports)
 from openlift.core.design import GeoMatcher, PowerAnalysis
 from openlift.core.io import load_data
-import pandas as pd
 
 design_app = typer.Typer(help="Design assistant tools.")
 app.add_typer(design_app, name="design")

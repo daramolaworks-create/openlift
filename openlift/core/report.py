@@ -3,9 +3,10 @@ from typing import Dict, Any
 def format_json_output(
     experiment_config: Dict[str, Any],
     model_config: Dict[str, Any],
-    metrics: Dict[str, Any]
+    metrics: Dict[str, Any],
+    decision: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
-    return {
+    output = {
         "experiment": experiment_config.get("name"),
         "test_geo": experiment_config.get("test_geo"),
         "control_geos": experiment_config.get("control_geos"),
@@ -20,6 +21,9 @@ def format_json_output(
         "metrics": metrics,
         "model": model_config
     }
+    if decision:
+        output["decision"] = decision
+    return output
 
 def print_summary(results: Dict[str, Any]):
     m = results["metrics"]
@@ -29,4 +33,7 @@ def print_summary(results: Dict[str, Any]):
     print(f"Incremental Outcome: {m['incremental_outcome_mean']:.2f} (HDI 90%: {m['incremental_outcome_hdi_90'][0]:.2f}, {m['incremental_outcome_hdi_90'][1]:.2f})")
     print(f"Lift %: {m['lift_pct_mean']:.2%} (HDI 90%: {m['lift_pct_hdi_90'][0]:.2%}, {m['lift_pct_hdi_90'][1]:.2%})")
     print(f"Prob(Lift > 0): {m['p_positive']:.2%}")
+    if "decision" in results:
+        print(f"Decision: {results['decision'].get('decision')}")
+        print(f"Recommendation: {results['decision'].get('recommendation')}")
     print("===================================\n")

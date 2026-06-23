@@ -42,3 +42,5 @@ def test_inference_calc():
     
     assert np.isclose(metrics["incremental_outcome_mean"], expected_total)
     assert metrics["p_positive"] == 1.0
+    assert "posterior_lift_distribution" in metrics
+    assert "histogram_counts" in metrics["posterior_lift_distribution"]

@@ -1,4 +1,8 @@
+import logging
 import pandas as pd
+
+logger = logging.getLogger(__name__)
+
 
 def load_data(
     path: str, 
@@ -28,18 +32,20 @@ def load_data(
     except Exception as e:
         raise ValueError(f"Could not parse date column '{date_col}': {e}")
         
-    # Check for missing outcomes
-    if df[outcome_col].isnull().any():
-        raise ValueError(f"Found missing values in outcome column '{outcome_col}'")
+    # Warn on missing outcomes — missing days are later filled with 0 in make_features.
+    n_missing = int(df[outcome_col].isnull().sum())
+    if n_missing:
+        logger.warning(
+            "Found %d missing values in outcome column '%s'. "
+            "They will be treated as 0 during modelling.",
+            n_missing,
+            outcome_col,
+        )
         
     # Pivot to wide format (date x geo)
-    # This automatically checks for duplicate (date, geo) pairs because pivot raises error on duplicates
-    # unless aggfunc is specified. We want it to raise error.
-    try:
-        df_wide = df.pivot(index=date_col, columns=geo_col, values=outcome_col)
-    except ValueError as e:
-        raise ValueError(f"Duplicate entries found for same date and geo. Each geo must have exactly one row per date. Details: {e}")
-        
+    # Aggregate duplicate (date, geo) pairs by summing before pivoting
+    df = df.groupby([date_col, geo_col], as_index=False)[outcome_col].sum()
+    df_wide = df.pivot(index=date_col, columns=geo_col, values=outcome_col)
     df_wide = df_wide.sort_index()
     
     return df_wide

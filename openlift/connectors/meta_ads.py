@@ -55,6 +55,16 @@ class MetaAdsConnector(DataConnector):
         self._account: Optional[AdAccount] = None
         self._ad_account_id: str = ""
 
+    def status(self) -> Dict:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "authenticated": self._authenticated,
+            "available": HAS_META,
+            "required_credentials": ["access_token", "ad_account_id"],
+            "metrics": self.AVAILABLE_METRICS.copy(),
+        }
+
     # ------------------------------------------------------------------
     # Auth
     # ------------------------------------------------------------------

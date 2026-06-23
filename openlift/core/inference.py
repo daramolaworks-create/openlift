@@ -66,6 +66,19 @@ def compute_lift(
     metrics["model_intercept"] = float(np.mean(alpha_flat))
     metrics["model_coefficients"] = [float(x) for x in np.mean(beta_flat, axis=0)]
     metrics["dow_effect"] = [float(x) for x in np.mean(dow_effect_flat, axis=0)]
+    hist_counts, hist_edges = np.histogram(lift_samples, bins=20)
+    metrics["posterior_lift_distribution"] = {
+        "samples_preview": [float(x) for x in lift_samples[:200]],
+        "histogram_counts": [int(x) for x in hist_counts],
+        "histogram_edges": [float(x) for x in hist_edges],
+        "quantiles": {
+            "p05": float(np.quantile(lift_samples, 0.05)),
+            "p25": float(np.quantile(lift_samples, 0.25)),
+            "p50": float(np.quantile(lift_samples, 0.50)),
+            "p75": float(np.quantile(lift_samples, 0.75)),
+            "p95": float(np.quantile(lift_samples, 0.95)),
+        },
+    }
     
     if covariate_effects:
         metrics["covariate_effects"] = covariate_effects

@@ -127,6 +127,8 @@ def run_multi_cell_experiment(
         - "config": the experiment configuration
     """
     df[date_col] = pd.to_datetime(df[date_col])
+    # Aggregate duplicate (date, geo) pairs before pivoting
+    df = df.groupby([date_col, geo_col], as_index=False)[outcome_col].sum()
     df_wide = df.pivot(index=date_col, columns=geo_col, values=outcome_col).sort_index()
 
     cell_results = {}

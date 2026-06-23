@@ -1,9 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import tempfile
-import matplotlib.pyplot as plt
-from pathlib import Path
 from openlift.core.pipeline import run_geo_lift_df
 from openlift.core.design import GeoMatcher, PowerAnalysis
 from openlift.core.llm import LLMService
@@ -13,7 +10,14 @@ from openlift.core.multi_cell import (
     run_multi_cell_experiment,
 )
 from openlift.connectors import GoogleSheetsConnector, GoogleAdsConnector, MetaAdsConnector
-
+from openlift.core.diagnostics import DataValidator
+from openlift.core.economics import calculate_economics, recommend_budget, simulate_budget_scenarios, build_payback_curve
+from openlift.core.evidence import calculate_evidence_strength
+from openlift.core.report_generator import MarkdownReportGenerator
+from openlift.core.decision import build_decision_summary
+from openlift.core.creative import analyze_creative_lift, infer_creative_columns
+from openlift.core.experiment_designer import recommend_next_experiment
+from openlift.core.memory import ExperimentRegistry
 # Check which optional connectors are available
 HAS_GOOGLE_ADS = GoogleAdsConnector is not None
 HAS_META_ADS = MetaAdsConnector is not None
@@ -44,7 +48,7 @@ def load_local_font(font_path, font_name, font_weight=400):
 # Load fonts from assets
 font_css = ""
 font_css += load_local_font("assets/Poppins-Regular.ttf", "Poppins", 400)
-font_css += load_local_font("assets/Poppins-Bold.ttf", "Poppins", 600)
+font_css += load_local_font("assets/Poppins-ExtraBold.ttf", "Poppins", 700)
 # Fallback if files missing (keep Google Fonts as backup or just rely on local)
 # We will use local if available, otherwise fallback.
 
@@ -250,17 +254,24 @@ if df is not None:
     # LLM Config
     st.sidebar.divider()
     st.sidebar.subheader("🤖 AI Co-Pilot")
-    llm_provider_selection = st.sidebar.selectbox("Provider", ["Gemini", "DeepSeek (Reasoner)", "Ollama (Local)"], index=0)
-    
+    llm_provider_selection = st.sidebar.selectbox(
+        "Provider",
+        ["Gemini", "Claude (Anthropic)", "DeepSeek (Reasoner)", "Ollama (Local)"],
+        index=0,
+    )
+
     api_key = None
     model_name = None
     provider_key = "gemini"
-    
+
     if llm_provider_selection == "Gemini":
         provider_key = "gemini"
         api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Enter Google AI Studio key.")
-        # User sees Gemini 2.5 Flash in dashboard
         model_name = st.sidebar.text_input("Gemini Model", value="gemini-2.5-flash", help="e.g. gemini-2.5-flash, gemini-1.5-pro")
+    elif llm_provider_selection == "Claude (Anthropic)":
+        provider_key = "claude"
+        api_key = st.sidebar.text_input("Anthropic API Key", type="password", help="Enter your Anthropic API key.")
+        model_name = st.sidebar.text_input("Claude Model", value="claude-sonnet-4-6", help="e.g. claude-sonnet-4-6, claude-opus-4-8")
     elif llm_provider_selection == "DeepSeek (Reasoner)":
         provider_key = "deepseek"
         api_key = st.sidebar.text_input("DeepSeek API Key", type="password", help="Enter DeepSeek API key.")
@@ -269,8 +280,6 @@ if df is not None:
         provider_key = "ollama"
         model_name = st.sidebar.text_input("Local Model Name", value="llama3", help="Make sure you have this model installed via 'ollama pull llama3'")
         st.sidebar.info("Ensure Ollama is running (`ollama serve`).")
-        # Cloud Warning
-        # Cloud Warning
         is_cloud = False
         try:
             if hasattr(st, "context") and hasattr(st.context, "headers"):
@@ -279,9 +288,8 @@ if df is not None:
                     is_cloud = True
         except Exception:
             pass
-
         if is_cloud:
-             st.sidebar.warning("⚠️ **Cloud Note:** Ollama (Local) will NOT work on Streamlit Cloud. Switch to Gemini.")
+            st.sidebar.warning("⚠️ **Cloud Note:** Ollama (Local) will NOT work on Streamlit Cloud. Switch to Gemini or Claude.")
 
     llm = LLMService(provider=provider_key, api_key=api_key, model_name=model_name)
     
@@ -294,6 +302,11 @@ if df is not None:
     # Cost/Input Metric
     cost_col = st.sidebar.selectbox("Input Metric (X) [Optional]", ["None"] + list(df.columns), index=0, help="The metric you changed/increased (e.g. Amount Spend, Impressions). Used to calculate ROI.")
     
+    st.sidebar.divider()
+    st.sidebar.subheader("Economics")
+    margin_pct = st.sidebar.number_input("Gross Margin (%)", min_value=0.0, max_value=100.0, value=100.0) / 100.0
+    ltv = st.sidebar.number_input("Customer LTV", min_value=0.0, value=1.0, help="If Outcome is conversions, what is the value of one conversion?")
+    
     # Pre-processing dates
     try:
         df[date_col] = pd.to_datetime(df[date_col])
@@ -305,7 +318,25 @@ if df is not None:
     max_date = df[date_col].max().date()
     all_geos = sorted(df[geo_col].unique().tolist())
     
-    tab1, tab2, tab3, tab4 = st.tabs(["🚀 Experiment Runner", "🗺️ Geo Matcher", "⚡ Power Analysis", "🧪 Multi-Cell"])
+    # --- DATA QUALITY DIAGNOSTICS ---
+    validator = DataValidator(df, date_col, geo_col, outcome_col, cost_col)
+    dq_result = validator.evaluate()
+    with st.expander(f"📊 Data Quality Score: {dq_result['score']}/100 ({dq_result['status']})"):
+        if dq_result['warnings']:
+            for w in dq_result['warnings']:
+                st.warning(w)
+        else:
+            st.success("Data looks clean and ready for modeling.")
+    
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "🚀 Experiment Runner",
+        "🗺️ Geo Matcher",
+        "⚡ Power Analysis",
+        "🧪 Multi-Cell",
+        "🎨 Creative Lift",
+        "🧭 Next Experiment",
+        "📚 Scorecard",
+    ])
     
     # ==========================================
     # TAB 1: EXPERIMENT RUNNER (Existing Logic)
@@ -393,6 +424,39 @@ if df is not None:
                             longitude=cov_lon,
                         )
                         m = results['metrics']
+                        dq_run = DataValidator(
+                            df,
+                            date_col,
+                            geo_col,
+                            outcome_col,
+                            cost_col,
+                            pre_start=str(pre_start),
+                            pre_end=str(pre_end),
+                            post_start=str(post_start),
+                            post_end=str(post_end),
+                        ).evaluate()
+
+                        match_score = None
+                        try:
+                            matcher = GeoMatcher(df, date_col, geo_col, outcome_col)
+                            control_matches = matcher.find_controls(
+                                test_geo,
+                                pool_geos=control_geos,
+                                lookback_days=max(14, (pre_end - pre_start).days + 1),
+                                n_controls=len(control_geos),
+                            )
+                            if control_matches:
+                                match_score = float(np.mean([score for _, score in control_matches]))
+                                results["match_quality"] = {
+                                    "method": "dtw",
+                                    "average_distance": match_score,
+                                    "control_scores": [
+                                        {"geo": geo, "distance": float(score)}
+                                        for geo, score in control_matches
+                                    ],
+                                }
+                        except Exception as match_error:
+                            results["match_quality"] = {"error": str(match_error)}
                         
                         # --- ANALYZE INPUT (COST) CHANGE ---
                         input_change_pct = 0.0
@@ -428,24 +492,92 @@ if df is not None:
                         
                         st.divider()
                         # KPIs
+                        # --- ECONOMICS & EVIDENCE ---
+                        outcome_is_revenue = True if "revenue" in outcome_col.lower() else False
+                        eco = calculate_economics(
+                            incremental_outcome=m['incremental_outcome_mean'],
+                            input_change_abs=input_change_abs,
+                            outcome_is_revenue=outcome_is_revenue,
+                            margin_pct=margin_pct,
+                            ltv=ltv
+                        )
+                        
+                        relative_hdi_width = (m.get('incremental_outcome_hdi_90', [0,0])[1] - m.get('incremental_outcome_hdi_90', [0,0])[0]) / m['incremental_outcome_mean'] if m['incremental_outcome_mean'] > 0 else 2.0
+                        evidence = calculate_evidence_strength(m['p_positive'], match_score=match_score, relative_hdi_width=relative_hdi_width)
+                        recommendation = recommend_budget(m['p_positive'], eco.get("incremental_roas"), eco.get("incremental_profit"))
+                        decision = build_decision_summary(
+                            m,
+                            economics=eco,
+                            data_quality=dq_run,
+                            match_score=match_score,
+                            pre_period_days=(pre_end - pre_start).days + 1,
+                            post_period_days=(post_end - post_start).days + 1,
+                        )
+                        results["decision"] = decision
+                        ExperimentRegistry().add_result(results)
+
                         k1, k2, k3, k4 = st.columns(4)
                         k1.metric("Incremental Lift (Y)", f"{m['incremental_outcome_mean']:.1f}")
-                        k2.metric("Lift % (Y)", f"{m['lift_pct_mean']:.1f}%")
-                        k3.metric("Confidence", f"{m['p_positive']*100:.1f}%")
+                        k2.metric("Lift % (Y)", f"{m['lift_pct_mean']:.1%}")
+                        k3.metric("Evidence Strength", decision["evidence_strength"])
                         
                         if has_input:
-                            k4.metric(
-                                f"Input Shift ({cost_col})", 
-                                f"{input_change_pct:+.1f}%",
-                                f"Est. Delta: {input_change_abs:+.1f}"
-                            )
+                            roas_str = f"{eco.get('incremental_roas', 0):.2f}" if eco.get('incremental_roas') else "N/A"
+                            prof_str = f"{eco.get('incremental_profit', 0):.0f}" if eco.get('incremental_profit') else "N/A"
+                            k4.metric(f"Inc. ROAS / Profit", f"{roas_str}", f"{prof_str} profit")
                         else:
                             k4.metric("Input Shift", "-", "Select Input Col to see ROI")
 
+                        if m.get("posterior_lift_distribution"):
+                            st.subheader("Posterior Lift Distribution")
+                            posterior_preview = pd.DataFrame({
+                                "Incremental lift": m["posterior_lift_distribution"]["samples_preview"]
+                            })
+                            st.bar_chart(posterior_preview)
+
                         # Efficiency / ROI
                         if has_input and m['incremental_outcome_mean'] > 0 and input_change_abs > 0:
-                            cpi = input_change_abs / m['incremental_outcome_mean']
-                            st.info(f"💰 **Efficiency:** You spent approx. **{input_change_abs:.1f}** more {cost_col} to get **{m['incremental_outcome_mean']:.1f}** more {outcome_col}.\n\n**Cost Per Incremental Result:** {cpi:.2f}")
+                            st.info(f"💰 **Efficiency:** You spent approx. **{input_change_abs:.1f}** more {cost_col} to get **{m['incremental_outcome_mean']:.1f}** more {outcome_col}.")
+                            scenarios = simulate_budget_scenarios(
+                                current_input=post_sum,
+                                incremental_roas=eco.get("incremental_roas"),
+                                incremental_cac=eco.get("incremental_cac"),
+                                incremental_profit=eco.get("incremental_profit"),
+                                p_positive=m["p_positive"],
+                                risk_tolerance="medium",
+                            )
+                            scenario_df = pd.DataFrame(scenarios)
+                            scenario_df["change_pct"] = scenario_df["change_pct"].map(lambda x: f"{x:+.0%}")
+                            st.dataframe(
+                                scenario_df[
+                                    [
+                                        "change_pct",
+                                        "new_input",
+                                        "input_delta",
+                                        "confidence_weight",
+                                        "expected_incremental_revenue",
+                                        "expected_incremental_profit",
+                                    ]
+                                ],
+                                use_container_width=True,
+                            )
+                            incremental_revenue = (
+                                m["incremental_outcome_mean"]
+                                if outcome_is_revenue
+                                else m["incremental_outcome_mean"] * ltv
+                            )
+                            payback_curve = pd.DataFrame(
+                                build_payback_curve(
+                                    incremental_revenue=incremental_revenue,
+                                    input_change_abs=input_change_abs,
+                                    margin_pct=margin_pct,
+                                )
+                            )
+                            if not payback_curve.empty:
+                                st.subheader("LTV / Payback Curve")
+                                st.line_chart(payback_curve.set_index("month")[["cumulative_gross_profit", "remaining_payback"]])
+                                if eco.get("payback_period_months") is not None:
+                                    st.caption(f"Estimated payback period: {eco['payback_period_months']:.1f} months")
 
                         # --- COVARIATE EFFECTS ---
                         if m.get("covariate_effects"):
@@ -457,35 +589,46 @@ if df is not None:
                                 cov_cols[idx].metric(
                                     f"{icon} {cov_name}",
                                     f"{effect:+.3f}",
-                                    help=f"Learned effect of {cov_name} on daily {outcome_col}. Positive = increases outcome on those days."
+                                    help=f"Learned effect of {cov_name} on daily {outcome_col}."
                                 )
-                            st.caption("These covariates were automatically controlled for in the Bayesian model, improving the accuracy of the lift estimate.")
 
                         # --- INSIGHTS ---
                         st.subheader("💡 Analysis & Insights")
-                        
-                        # Lift Insight
-                        lift_sign = "POSITIVE" if m['incremental_outcome_mean'] > 0 else "NEGATIVE"
-                        lift_quality = "SIGNIFICANT" if m['p_positive'] > 0.9 else "DIRECTIONAL"
+                        st.markdown(f"**Decision:** {decision['decision']} ({decision['scale_range']})")
+                        st.markdown(f"**Recommendation:** {decision['recommendation']}")
+                        with st.expander("Limitations & Next Action"):
+                            for item in decision["limitations"]:
+                                st.warning(item)
+                            st.info(decision["next_action"])
                         
                         # Standard Rule-Based Insight (Fallback)
+                        lift_sign = "POSITIVE" if m['incremental_outcome_mean'] > 0 else "NEGATIVE"
                         insight_text = f"""
                         **What happened?**
-                        We observed a **{m['lift_pct_mean']:.1f}% {lift_sign.lower()} lift** in {outcome_col} during the test period. 
+                        We observed a **{m['lift_pct_mean']:.1%} {lift_sign.lower()} lift** in {outcome_col} during the test period. 
                         This means your campaign generated approximately **{m['incremental_outcome_mean']:.0f} extra {outcome_col}** that wouldn't have happened otherwise.
                         
                         **How sure are we?**
-                        We are **{m['p_positive']*100:.1f}% confident** that this lift is real (not just random noise). 
+                        We are **{m['p_positive']*100:.1f}% confident** that this lift is real.
                         """
-                        
-                        if m['p_positive'] > 0.95:
-                            insight_text += "This is a **very strong result**. You can be confident in these numbers."
-                        elif m['p_positive'] > 0.8:
-                            insight_text += "This is a **promising result**, but there is still some chance (approx 20%) it could be noise."
-                        else:
-                            insight_text += "⚠️ **Caution:** This result is **not statistically significant**. The lift we see might just be random fluctuation."
-                            
                         st.markdown(insight_text)
+                        
+                        # --- REPORT EXPORT ---
+                        report_gen = MarkdownReportGenerator(
+                            experiment_name=f"Geo-Lift on {test_geo}",
+                            test_geo=test_geo,
+                            control_geos=control_geos,
+                            metrics=m,
+                            evidence=evidence,
+                            economics=eco,
+                            recommendation=recommendation,
+                            data_quality=dq_run,
+                            decision=decision,
+                        )
+                        md_report = report_gen.generate()
+                        html_report = report_gen.generate_html()
+                        st.download_button("📥 Download Executive Report", md_report, file_name=f"openlift_report_{test_geo}.md", mime="text/markdown")
+                        st.download_button("📥 Download HTML Report", html_report, file_name=f"openlift_report_{test_geo}.html", mime="text/html")
                         
                         # --- LLM SMART INSIGHT ---
                         if llm.is_available():
@@ -549,6 +692,11 @@ if df is not None:
             
             match_df = pd.DataFrame(matches, columns=["Geo", "Distance Score"])
             st.dataframe(match_df)
+
+            holdouts = matcher.recommend_holdouts([target_geo], lookback_days=lookback, n_holdouts=5)
+            if holdouts:
+                st.subheader("Recommended Holdout Group")
+                st.dataframe(pd.DataFrame(holdouts), use_container_width=True)
             
             # Visual check
             st.subheader("Visual Comparison")
@@ -600,11 +748,20 @@ if df is not None:
                     )
                     
                 power = res['power']
+                rec_duration = pa.recommend_duration(
+                    pa_target,
+                    pa_controls,
+                    lift_est,
+                    target_power=0.8,
+                    max_duration=90,
+                )
                 
                 st.divider()
                 st.subheader("💡 Pre-Flight Check")
                 
                 st.metric("Estimated Probability of Success", f"{power*100:.1f}%")
+                if rec_duration > 0:
+                    st.metric("Recommended Duration", f"{rec_duration} days")
                 
                 if power > 0.8:
                     st.success(f"""
@@ -736,7 +893,6 @@ if df is not None:
             if valid:
                 with st.spinner("Running Multi-Cell MCMC (this may take a moment)..."):
                     try:
-                        from datetime import datetime as _dt
                         mc_config = MultiCellExperimentConfig(
                             name="multi_cell_experiment",
                             cells=[CellConfig(**cc) for cc in cell_configs],
@@ -765,7 +921,7 @@ if df is not None:
                                     m = result["metrics"]
                                     st.markdown(f"### {label}: {result.get('cell_name', '')}")
                                     st.metric("Incremental Lift", f"{m['incremental_outcome_mean']:.1f}")
-                                    st.metric("Lift %", f"{m['lift_pct_mean']:.1f}%")
+                                    st.metric("Lift %", f"{m['lift_pct_mean']:.1%}")
                                     st.metric("Confidence", f"{m['p_positive']*100:.0f}%")
                                     st.caption(f"Geos: {', '.join(result.get('cell_test_geos', []))}")
 
@@ -814,7 +970,7 @@ if df is not None:
                                 chart_data.append({
                                     "Cell": f"{label}: {result.get('cell_name', '')}",
                                     "Incremental Lift": m["incremental_outcome_mean"],
-                                    "Lift %": m["lift_pct_mean"],
+                                    "Lift %": m["lift_pct_mean"] * 100,
                                 })
                         if chart_data:
                             chart_df = pd.DataFrame(chart_data).set_index("Cell")
@@ -838,6 +994,166 @@ if df is not None:
 
                     except Exception as e:
                         st.error(f"Multi-Cell Error: {e}")
+
+    # ==========================================
+    # TAB 5: CREATIVE LIFT
+    # ==========================================
+    with tab5:
+        st.header("🎨 Creative Intelligence")
+        st.markdown("Upload creative metadata to see aggregated performance by creative type.")
+        creative_file = st.file_uploader("Upload Creative CSV (must contain join column)", type=["csv"], key="creative_upload")
+        
+        if creative_file is not None:
+            c_df = pd.read_csv(creative_file)
+            st.success(f"Loaded {len(c_df)} creative rows.")
+            
+            # Require matching column in main df
+            possible_joins = list(set(df.columns).intersection(set(c_df.columns)))
+            if possible_joins:
+                inferred = infer_creative_columns(c_df)
+                preferred_join = inferred.get("join") if inferred.get("join") in possible_joins else possible_joins[0]
+                join_options = [preferred_join] + [c for c in possible_joins if c != preferred_join]
+                join_col = st.selectbox("Join Column", join_options, help="Column that exists in both Main Data and Creative Data")
+                creative_group_options = [c for c in c_df.columns if c != join_col]
+                default_group = inferred.get("group") if inferred.get("group") in ([join_col] + creative_group_options) else creative_group_options[0] if creative_group_options else join_col
+                group_col = st.selectbox(
+                    "Creative Grouping",
+                    [join_col] + creative_group_options,
+                    index=([join_col] + creative_group_options).index(default_group) if default_group in ([join_col] + creative_group_options) else 0,
+                    help="Group creatives by hook, angle, format, offer, or creative ID.",
+                )
+                numeric_cols = [
+                    c for c in c_df.columns
+                    if pd.to_numeric(c_df[c], errors="coerce").notna().any()
+                ]
+                outcome_options = numeric_cols or list(c_df.columns)
+                inferred_outcome = inferred.get("outcome") if inferred.get("outcome") in outcome_options else outcome_col if outcome_col in outcome_options else outcome_options[0]
+                creative_outcome_col = st.selectbox(
+                    "Creative Outcome Column",
+                    outcome_options,
+                    index=outcome_options.index(inferred_outcome),
+                    help="Metric to compare by creative group, e.g. results, purchases, revenue, or conversions.",
+                )
+                treatment_col = st.selectbox(
+                    "Treatment Column",
+                    ["None"] + list(df.columns),
+                    index=(["None"] + list(df.columns)).index(inferred.get("treatment")) if inferred.get("treatment") in df.columns else 0,
+                    help="Only select this if the column marks treated vs control rows.",
+                )
+                period_col = st.selectbox(
+                    "Period Column",
+                    ["None"] + list(df.columns),
+                    index=(["None"] + list(df.columns)).index(inferred.get("period")) if inferred.get("period") in df.columns else 0,
+                    help="Only select this if values are pre/post or treatment/control periods.",
+                )
+                spend_options = [c for c in c_df.columns if c != creative_outcome_col]
+                inferred_spend = inferred.get("spend") if inferred.get("spend") in spend_options else "spend" if "spend" in spend_options else spend_options[0] if spend_options else creative_outcome_col
+                spend_col = st.selectbox(
+                    "Spend Column",
+                    spend_options or [creative_outcome_col],
+                    index=(spend_options or [creative_outcome_col]).index(inferred_spend),
+                )
+                
+                if st.button("Analyze Creative Lift"):
+                    with st.spinner("Aggregating creative performance..."):
+                        try:
+                            res_df = analyze_creative_lift(
+                                df,
+                                c_df,
+                                join_col=join_col,
+                                date_col=date_col,
+                                outcome_col=creative_outcome_col,
+                                spend_col=spend_col,
+                                treatment_col=treatment_col if treatment_col != "None" else "__missing_treatment__",
+                                period_col=period_col if period_col != "None" else "__missing_period__",
+                                group_col=group_col,
+                            )
+                            if not res_df.empty:
+                                st.dataframe(res_df)
+                                if "creative_lift_score" in res_df.columns:
+                                    st.bar_chart(res_df.set_index(res_df.columns[0])["creative_lift_score"])
+                                if "roas" in res_df.columns:
+                                    st.bar_chart(res_df.set_index(res_df.columns[0])["roas"])
+                            else:
+                                st.warning("Could not aggregate data. Make sure outcome, spend, and creative grouping columns are present.")
+                        except Exception as e:
+                            st.error(f"Error analyzing creative data: {e}")
+            else:
+                st.error("No matching columns found between main data and creative metadata.")
+
+    # ==========================================
+    # TAB 6: NEXT EXPERIMENT
+    # ==========================================
+    with tab6:
+        st.header("AI Test Recommendation Engine")
+        st.markdown("Generate a concrete next experiment plan from the data you uploaded.")
+
+        ne_c1, ne_c2, ne_c3 = st.columns(3)
+        expected_lift = ne_c1.number_input("Expected Lift %", min_value=0.01, max_value=1.0, value=0.10, step=0.01, key="ne_lift")
+        target_power = ne_c2.number_input("Target Power", min_value=0.5, max_value=0.95, value=0.80, step=0.05, key="ne_power")
+        max_duration = ne_c3.number_input("Max Duration", min_value=14, max_value=120, value=60, step=7, key="ne_duration")
+
+        if st.button("Recommend Next Experiment", type="primary", key="ne_button"):
+            with st.spinner("Designing next experiment..."):
+                plan = recommend_next_experiment(
+                    df,
+                    date_col=date_col,
+                    geo_col=geo_col,
+                    outcome_col=outcome_col,
+                    input_col=cost_col if cost_col != "None" else None,
+                    expected_lift=expected_lift,
+                    target_power=target_power,
+                    max_duration=int(max_duration),
+                )
+
+            if "error" in plan:
+                st.error(plan["error"])
+            else:
+                p1, p2, p3 = st.columns(3)
+                p1.metric("Test Geo", plan["test_geo"])
+                p2.metric("Duration", f"{plan['duration_days']} days")
+                mde = plan.get("minimum_detectable_effect_pct")
+                p3.metric("MDE", f"{mde:.0%}" if mde and mde > 0 else "Not reached")
+
+                st.subheader("Experiment Plan")
+                st.markdown(f"**Objective:** {plan['objective']}")
+                st.markdown(f"**Hypothesis:** {plan['hypothesis']}")
+                st.markdown(f"**Primary metric:** {plan['primary_metric']}")
+                st.markdown(f"**Success threshold:** {plan['success_threshold']}")
+                st.markdown(f"**Interpretation plan:** {plan['interpretation_plan']}")
+
+                st.subheader("Controls and Holdout")
+                st.dataframe(pd.DataFrame(plan["control_scores"]), use_container_width=True)
+
+                if plan.get("required_input"):
+                    st.subheader("Required Spend / Input Estimate")
+                    st.json(plan["required_input"])
+
+                st.subheader("Risks")
+                for risk in plan["risks"]:
+                    st.warning(risk)
+
+    # ==========================================
+    # TAB 7: SCORECARD
+    # ==========================================
+    with tab7:
+        st.header("Incrementality Scorecard")
+        registry = ExperimentRegistry()
+        scorecard = registry.scorecard()
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Completed", scorecard["completed_experiments"])
+        s2.metric("Positive", scorecard["positive_experiments"])
+        s3.metric("Positive Rate", f"{scorecard['positive_rate']:.0%}")
+        avg_lift = scorecard.get("average_lift_pct")
+        s4.metric("Avg Lift", f"{avg_lift:.1%}" if avg_lift is not None else "N/A")
+
+        if scorecard["records"]:
+            score_df = pd.DataFrame(scorecard["records"])
+            st.dataframe(score_df, use_container_width=True)
+            if "lift_pct_mean" in score_df.columns:
+                st.line_chart(score_df["lift_pct_mean"])
+        else:
+            st.info("Run a measurement to start building cumulative incrementality memory.")
 
 else:
     st.info("Please upload a CSV file or connect a data source to begin.")

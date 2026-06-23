@@ -8,32 +8,34 @@ from .features import make_features
 from .model_pymc import build_model, fit_model
 from .inference import compute_lift
 from .report import format_json_output
+from .decision import build_decision_summary
+
+_MCMC_DEFAULTS = dict(draws=1000, tune=1000, chains=2, target_accept=0.9)
+
 
 def run_geo_lift(experiment_path: str) -> Dict[str, Any]:
-    """
-    Run an end-to-end geo-lift experiment from a YAML config file.
-    """
+    """Run an end-to-end geo-lift experiment from a YAML config file."""
     full_config = load_experiment_config(experiment_path)
     exp = full_config.experiment
     data_cfg = full_config.data
-    
+
     if not os.path.isabs(data_cfg.path):
         base_dir = os.path.dirname(experiment_path)
         data_path = os.path.join(base_dir, data_cfg.path)
     else:
         data_path = data_cfg.path
-        
+
     df_wide = load_data(data_path, data_cfg.date_col, data_cfg.geo_col, data_cfg.outcome_col)
-    
     return _run_pipeline(df_wide, exp)
 
+
 def run_geo_lift_df(
-    df: pd.DataFrame, 
-    test_geo: str, 
-    control_geos: List[str], 
-    pre_start: str, 
-    pre_end: str, 
-    post_start: str, 
+    df: pd.DataFrame,
+    test_geo: str,
+    control_geos: List[str],
+    pre_start: str,
+    pre_end: str,
+    post_start: str,
     post_end: str,
     date_col: str = 'date',
     geo_col: str = 'geo',
@@ -42,29 +44,37 @@ def run_geo_lift_df(
     country_code: Optional[str] = None,
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
+    draws: int = _MCMC_DEFAULTS["draws"],
+    tune: int = _MCMC_DEFAULTS["tune"],
+    chains: int = _MCMC_DEFAULTS["chains"],
+    target_accept: float = _MCMC_DEFAULTS["target_accept"],
 ) -> Dict[str, Any]:
     df[date_col] = pd.to_datetime(df[date_col])
+    df = df.groupby([date_col, geo_col], as_index=False)[outcome_col].sum()
     df_wide = df.pivot(index=date_col, columns=geo_col, values=outcome_col).sort_index()
-    
+
     from datetime import datetime
     def pars(d): return datetime.strptime(d, "%Y-%m-%d").date()
-    
-    exp_config = {
-        "name": name,
-        "test_geo": test_geo,
-        "control_geos": control_geos,
-        "pre_period": {"start_date": pars(pre_start), "end_date": pars(pre_end)},
-        "post_period": {"start_date": pars(post_start), "end_date": pars(post_end)}
-    }
-    
-    exp = ExperimentConfig(**exp_config)
-    
+
+    exp = ExperimentConfig(
+        name=name,
+        test_geo=test_geo,
+        control_geos=control_geos,
+        pre_period={"start_date": pars(pre_start), "end_date": pars(pre_end)},
+        post_period={"start_date": pars(post_start), "end_date": pars(post_end)},
+    )
+
     return _run_pipeline(
         df_wide, exp,
         country_code=country_code,
         latitude=latitude,
         longitude=longitude,
+        draws=draws,
+        tune=tune,
+        chains=chains,
+        target_accept=target_accept,
     )
+
 
 def _run_pipeline(
     df_wide: pd.DataFrame,
@@ -72,11 +82,15 @@ def _run_pipeline(
     country_code: Optional[str] = None,
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
+    draws: int = _MCMC_DEFAULTS["draws"],
+    tune: int = _MCMC_DEFAULTS["tune"],
+    chains: int = _MCMC_DEFAULTS["chains"],
+    target_accept: float = _MCMC_DEFAULTS["target_accept"],
 ) -> Dict[str, Any]:
     y_pre, X_pre, dow_pre, y_post, X_post, dow_post, scaler, Z_pre, Z_post, covariate_names = make_features(
-        df_wide, 
-        exp.test_geo, 
-        exp.control_geos, 
+        df_wide,
+        exp.test_geo,
+        exp.control_geos,
         pd.Timestamp(exp.pre_period.start_date),
         pd.Timestamp(exp.pre_period.end_date),
         pd.Timestamp(exp.post_period.start_date),
@@ -85,38 +99,25 @@ def _run_pipeline(
         latitude=latitude,
         longitude=longitude,
     )
-    
+
     model = build_model(y_pre, X_pre, dow_pre, Z_pre=Z_pre)
-    
-    draws = 1000
-    tune = 1000
-    chains = 2
-    target_accept = 0.9
-    
-    idata = fit_model(
-        model, 
-        draws=draws, 
-        tune=tune, 
-        chains=chains, 
-        target_accept=target_accept
-    )
-    
-    metrics = compute_lift(
-        idata, y_post, X_post, dow_post,
-        Z_post=Z_post,
-        covariate_names=covariate_names,
-    )
-    
+    idata = fit_model(model, draws=draws, tune=tune, chains=chains, target_accept=target_accept)
+
+    metrics = compute_lift(idata, y_post, X_post, dow_post, Z_post=Z_post, covariate_names=covariate_names)
+
+    pre_days = (exp.pre_period.end_date - exp.pre_period.start_date).days + 1
+    post_days = (exp.post_period.end_date - exp.post_period.start_date).days + 1
+    decision = build_decision_summary(metrics, pre_period_days=pre_days, post_period_days=post_days)
+
     model_config = {
         "draws": draws,
         "tune": tune,
         "chains": chains,
         "target_accept": target_accept,
     }
-    
     if covariate_names:
         model_config["covariates"] = covariate_names
-    
+
     exp_dict = {
         "name": exp.name,
         "test_geo": exp.test_geo,
@@ -124,5 +125,5 @@ def _run_pipeline(
         "pre_period": {"start_date": exp.pre_period.start_date, "end_date": exp.pre_period.end_date},
         "post_period": {"start_date": exp.post_period.start_date, "end_date": exp.post_period.end_date},
     }
-    
-    return format_json_output(exp_dict, model_config, metrics)
+
+    return format_json_output(exp_dict, model_config, metrics, decision=decision)

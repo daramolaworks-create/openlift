@@ -1,4 +1,4 @@
-experiment:
+ experiment:
   name: meta_lagos_test
   test_geo: Lagos
   control_geos: [Ibadan, Abeokuta, Benin]

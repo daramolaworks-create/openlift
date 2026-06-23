@@ -59,6 +59,22 @@ class GoogleAdsConnector(DataConnector):
         self._customer_id: str = ""
         self._geo_level: str = "region"
 
+    def status(self) -> Dict:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "authenticated": self._authenticated,
+            "available": HAS_GOOGLE_ADS,
+            "required_credentials": [
+                "developer_token",
+                "client_id",
+                "client_secret",
+                "refresh_token",
+                "customer_id",
+            ],
+            "metrics": self.AVAILABLE_METRICS.copy(),
+        }
+
     # ------------------------------------------------------------------
     # Auth
     # ------------------------------------------------------------------

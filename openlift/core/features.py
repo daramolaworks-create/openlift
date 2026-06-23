@@ -1,6 +1,9 @@
+import logging
 import pandas as pd
 import numpy as np
 from typing import Tuple, List, Optional
+
+logger = logging.getLogger(__name__)
 
 class StandardScaler:
     def __init__(self):
@@ -48,7 +51,17 @@ def make_features(
         pre_df = df_wide.reindex(expected_pre_idx)
         post_df = df_wide.reindex(expected_post_idx)
         
-        # User request: Treat missing days as 0 (e.g. no conversions/spend that day)
+        # Missing days are treated as 0 (e.g. no conversions on that day).
+        pre_nan = int(pre_df.isna().sum().sum())
+        post_nan = int(post_df.isna().sum().sum())
+        if pre_nan or post_nan:
+            logger.warning(
+                "Imputed %d missing values with 0 in the pre-period and %d in the "
+                "post-period. If gaps are due to data quality issues rather than "
+                "genuine zero-activity days, results may be distorted.",
+                pre_nan,
+                post_nan,
+            )
         pre_df = pre_df.fillna(0)
         post_df = post_df.fillna(0)
         

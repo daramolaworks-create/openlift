@@ -1,9 +1,7 @@
 import numpy as np
 import pandas as pd
 from typing import List, Dict, Any, Tuple, Optional
-from scipy.spatial.distance import euclidean
 from fastdtw import fastdtw
-from sklearn.preprocessing import StandardScaler
 from datetime import timedelta
 import logging
 
@@ -18,6 +16,8 @@ class GeoMatcher:
         
         # Ensure date column is datetime
         self.df[self.date_col] = pd.to_datetime(self.df[self.date_col])
+        # Aggregate duplicate (date, geo) pairs before pivoting
+        self.df = self.df.groupby([self.date_col, self.geo_col], as_index=False)[self.outcome_col].sum()
         self.df_wide = self.df.pivot(index=self.date_col, columns=self.geo_col, values=self.outcome_col).sort_index()
 
     def find_controls(
@@ -70,6 +70,44 @@ class GeoMatcher:
         
         return scores[:n_controls]
 
+    def recommend_holdouts(
+        self,
+        treatment_geos: List[str],
+        lookback_days: int = 90,
+        n_holdouts: int = 5,
+        method: str = "dtw",
+    ) -> List[Dict[str, Any]]:
+        """
+        Recommend holdout geos by averaging similarity to all treatment geos.
+        """
+        pool_geos = [g for g in self.df_wide.columns if g not in treatment_geos]
+        aggregate = {}
+        counts = {}
+        for test_geo in treatment_geos:
+            if test_geo not in self.df_wide.columns:
+                continue
+            matches = self.find_controls(
+                test_geo,
+                pool_geos=pool_geos,
+                lookback_days=lookback_days,
+                n_controls=len(pool_geos),
+                method=method,
+            )
+            for geo, score in matches:
+                aggregate[geo] = aggregate.get(geo, 0.0) + float(score)
+                counts[geo] = counts.get(geo, 0) + 1
+
+        rows = []
+        for geo, total in aggregate.items():
+            avg_score = total / counts[geo]
+            rows.append({
+                "geo": geo,
+                "holdout_score": avg_score,
+                "match_quality": "High" if avg_score < 1 else "Medium" if avg_score < 2 else "Low",
+            })
+        rows.sort(key=lambda row: row["holdout_score"])
+        return rows[:n_holdouts]
+
 class PowerAnalysis:
     def __init__(
         self, 
@@ -114,8 +152,9 @@ class PowerAnalysis:
         """
         from sklearn.linear_model import Ridge
         
-        # Prepare data
-        df_wide = self.df.pivot(index=self.date_col, columns=self.geo_col, values=self.outcome_col).sort_index()
+        # Prepare data — deduplicate before pivot
+        df_deduped = self.df.groupby([self.date_col, self.geo_col], as_index=False)[self.outcome_col].sum()
+        df_wide = df_deduped.pivot(index=self.date_col, columns=self.geo_col, values=self.outcome_col).sort_index()
         
         # User request: Treat missing days as 0 (e.g. no conversions/spend that day)
         df_wide = df_wide.fillna(0)
@@ -165,25 +204,16 @@ class PowerAnalysis:
             
             # Estimated Lift
             estimated_lift = y_treated_post - y_pred_post
-            avg_estimated_lift = np.mean(estimated_lift)
-            
-            # Simple Z-test / T-test logic
-            # SE of the mean difference ≈ std_error / sqrt(n) (simplified)
-            # A more robust check might consider auto-correlation
-            se_mean = std_error # conservative, assuming prediction error similar to daily noise
-            
-            # If the confidence interval (95%) excludes 0
-            # Lower bound > 0
-            # 1.96 * std_error of the SUM?
-            # Let's look at total uplift.
+
+            # One-sided z-test on the total lift.
+            # SE of the sum of N independent residuals ≈ sqrt(N) * std_error.
+            from scipy.stats import norm as _norm
+            z_critical = _norm.ppf(1 - alpha)
             total_lift = np.sum(estimated_lift)
-            # Std dev of sum of N independent residuals = sqrt(N) * std_error
             se_total = np.sqrt(len(y_treated_post)) * std_error
-            
-            z_score = total_lift / se_total
-            
-            # One-sided test (we expect positive lift)
-            if z_score > 1.645: # 95% confidence one-sided
+            z_score = total_lift / se_total if se_total > 0 else 0.0
+
+            if z_score > z_critical:
                 detection_count += 1
                 
         power = detection_count / simulations
